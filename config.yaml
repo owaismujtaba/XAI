@@ -1,2 +1,26 @@
-run:
-  train_rnn: True
+
+mode: train # Options: train, inference
+
+data:
+  data_dir: /home/owais/projects/XAI/data/raw/hdf5_data_final
+
+model:
+  enc_hid_dim: 128
+  dec_hid_dim: 128
+  dec_emb_dim: 64
+  enc_dropout: 0.5
+  dec_dropout: 0.5
+  input_dim: 512
+  output_dim: 43 # 0-40 + SOS(41) + EOS(42)
+
+training:
+  batch_size: 8
+  n_epochs: 5
+  clip: 1
+  learning_rate: 0.001
+
+inference:
+  checkpoint_path: model_epoch_0.pt
+  sample_idx: 0
+  max_len: 50
+  output_plot: attention.png
