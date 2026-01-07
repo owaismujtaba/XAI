@@ -1,0 +1,2 @@
+run:
+  train_rnn: True
