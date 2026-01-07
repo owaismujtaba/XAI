@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 import sys
 import yaml
 
@@ -18,8 +19,10 @@ def train(model, iterator, optimizer, criterion, clip):
     epoch_loss = 0
     
     device = model.device
-    for i, batch in enumerate(iterator):
-        src, trg, src_len, trg_len = batch
+    
+    pbar = tqdm(iterator, desc="Training")
+    for i, batch in enumerate(pbar):
+        src, trg, src_len, trg_len, meta = batch
         # src: [B, T, D]
         # trg: [B, L]
         
@@ -47,8 +50,7 @@ def train(model, iterator, optimizer, criterion, clip):
         
         epoch_loss += loss.item()
         
-        if i % 10 == 0:
-            print(f'Step {i} | Loss: {loss.item():.3f}')
+        pbar.set_postfix(loss=loss.item())
             
     return epoch_loss / len(iterator)
 
@@ -57,9 +59,10 @@ def evaluate(model, iterator, criterion):
     epoch_loss = 0
     
     device = model.device
+    pbar = tqdm(iterator, desc="Evaluating")
     with torch.no_grad():
-        for i, batch in enumerate(iterator):
-            src, trg, src_len, trg_len = batch
+        for i, batch in enumerate(pbar):
+            src, trg, src_len, trg_len, meta = batch
             src = src.to(device)
             trg = trg.to(device)
             src_len = src_len.to(device)
@@ -72,6 +75,8 @@ def evaluate(model, iterator, criterion):
 
             loss = criterion(output, trg)
             epoch_loss += loss.item()
+            
+            pbar.set_postfix(loss=loss.item())
         
     return epoch_loss / len(iterator)
 

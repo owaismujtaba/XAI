@@ -47,35 +47,40 @@ class BrainDataset(Dataset):
         with h5py.File(filepath, 'r') as f:
             group = f[trial_key]
             input_features = group['input_features'][:]
-            seq_class_ids = group['seq_class_ids'][:]
+            
+            # Use attributes if available, else use shape
+            input_length = group.attrs.get('n_time_steps', input_features.shape[0])
+            
+            if 'seq_class_ids' in group:
+                seq_class_ids = group['seq_class_ids'][:]
+                target_length = group.attrs.get('seq_len', 0)
+                if target_length == 0:
+                    non_zero_indices = np.nonzero(seq_class_ids)[0]
+                    if len(non_zero_indices) > 0:
+                        target_length = non_zero_indices[-1] + 1
+            else:
+                seq_class_ids = np.array([], dtype=np.int64)
+                target_length = 0
+            
+            # Additional metadata from official logic
+            metadata = {
+                'session': group.attrs.get('session'),
+                'block_num': group.attrs.get('block_num'),
+                'trial_num': group.attrs.get('trial_num'),
+                'sentence_label': group.attrs.get('sentence_label'),
+                'filepath': filepath,
+                'trial_key': trial_key
+            }
             
         # Convert to torch tensors
         input_features = torch.from_numpy(input_features).float()
         seq_class_ids = torch.from_numpy(seq_class_ids).long()
         
-        input_length = input_features.shape[0]
-        # Target length is tricky because it's padded. Real length is where not 0?
-        # Assuming 0 is padding, we count non-zeros. 
-        # But wait, 0 could be a valid class? In the inspection, 0 was dominant at the end.
-        # Usually 0 is silence/blank. 
-        # Let's assume 0 is padding for now. If 0 is a valid phoneme "silence", it should still likely be masked in loss if it's just filler.
-        # But in CTC, blank is usually index 0. 
-        # For Seq2Seq, we usually have a specific PAD token.
-        # Let's count non-zero elements as the length for now, or just pass the full length if the model handles padding.
-        
-        # Let's try to calculate simple length by finding the last non-zero index.
-        # If all are zero, length is 0 (should shouldn't happen).
-        non_zero_indices = torch.nonzero(seq_class_ids)
-        if len(non_zero_indices) > 0:
-            target_length = non_zero_indices[-1].item() + 1
-        else:
-            target_length = 0
-            
-        return input_features, seq_class_ids, input_length, target_length
+        return input_features, seq_class_ids, input_length, target_length, metadata
 
 def collate_fn(batch):
     # Pad inputs and targets to max length in batch
-    input_features, seq_class_ids, input_lengths, target_lengths = zip(*batch)
+    input_features, seq_class_ids, input_lengths, target_lengths, metadatas = zip(*batch)
     
     # Pad inputs (T x D) -> (B x T_max x D)
     input_features_padded = torch.nn.utils.rnn.pad_sequence(input_features, batch_first=True, padding_value=0)
@@ -98,8 +103,6 @@ def collate_fn(batch):
             valid_targets = torch.tensor([], dtype=torch.long)
             
         # Add SOS and EOS
-        # SOS at start, EOS at end
-        # We need to prepend [SOS] and append [EOS]
         sos_tensor = torch.tensor([SOS_TOKEN], dtype=torch.long)
         eos_tensor = torch.tensor([EOS_TOKEN], dtype=torch.long)
         
@@ -110,4 +113,4 @@ def collate_fn(batch):
     # Pad targets (B x L_max)
     seq_class_ids_padded = torch.nn.utils.rnn.pad_sequence(processed_targets, batch_first=True, padding_value=0)
     
-    return input_features_padded, seq_class_ids_padded, torch.tensor(input_lengths), torch.tensor(new_target_lengths)
+    return input_features_padded, seq_class_ids_padded, torch.tensor(input_lengths), torch.tensor(new_target_lengths), metadatas

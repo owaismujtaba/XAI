@@ -68,7 +68,7 @@ def main():
 
         dataset = BrainDataset(data_dir, dataset_type='train') # Or val/test
         sample_idx = i_cfg['sample_idx']
-        src, trg, _, _ = dataset[sample_idx]
+        src, trg, _, _, _ = dataset[sample_idx]
         
         print(f"Sample Index: {sample_idx}")
         print(f"Input shape: {src.shape}")

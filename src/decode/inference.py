@@ -98,7 +98,7 @@ if __name__ == "__main__":
     dataset = BrainDataset(data_dir, dataset_type='train')
     
     sample_idx = 0
-    src, trg, _, _ = dataset[sample_idx]
+    src, trg, _, _, _ = dataset[sample_idx]
     
     print(f"Input shape: {src.shape}")
     print(f"Target seq: {trg}")
