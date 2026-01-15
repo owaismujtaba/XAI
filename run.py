@@ -1,83 +1,136 @@
+"""
+Unified entry point for the XAI Brain-to-Text project.
+Uses config.yaml to determine whether to run training or evaluation.
+"""
 
 import os
 import sys
-import yaml
+import time
+import pandas as pd
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
+import torchaudio.functional as AF
+from omegaconf import OmegaConf
 
-# Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+# Add current directory to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from dataset.dataset import BrainDataset, collate_fn
-from decode.model import Encoder, Decoder, Attention, Seq2Seq
-# We can import train/evaluate from train.py if we want, or just re-implement simple loops here
-from decode.train import train, evaluate
-from decode.inference import translate_sentence, display_attention
+from src.core.trainer import BrainToTextTrainer
+from src.core.evaluator import BrainToTextEvaluator
+from src.utils.helpers import LOGIT_TO_PHONEME
+
+
+def load_trials(data_dir, sessions, eval_type):
+    """
+    Loads trial data for evaluation.
+    """
+    import h5py
+    all_trials = []
+    for session in sessions:
+        file_path = os.path.join(data_dir, session, f"data_{eval_type}.hdf5")
+        if not os.path.exists(file_path):
+            print(f"Warning: File {file_path} not found.")
+            continue
+            
+        with h5py.File(file_path, "r") as f:
+            for key in f.keys():
+                trial = f[key]
+                t_info = {
+                    "session": session,
+                    "block_num": trial.attrs["block_num"],
+                    "trial_num": trial.attrs["trial_num"],
+                    "neural_features": trial["input_features"][:],
+                }
+                if "seq_class_ids" in trial:
+                    true_ids = trial["seq_class_ids"][:].tolist()
+                    t_info["true_phonemes"] = " ".join([LOGIT_TO_PHONEME[i] for i in true_ids if i != 0])
+                
+                all_trials.append(t_info)
+    return all_trials
+
+
+def run_training(config):
+    """
+    Starts the training pipeline.
+    """
+    print("--- Starting Training ---")
+    os.makedirs(config.paths.output_dir, exist_ok=True)
+    os.makedirs(config.paths.checkpoint_dir, exist_ok=True)
+    
+    trainer = BrainToTextTrainer(config)
+    trainer.train()
+
+
+def run_evaluation(config):
+    """
+    Starts the evaluation pipeline.
+    """
+    print("--- Starting Evaluation ---")
+    eval_config = config.evaluation
+    
+    # Load original training configuration if available to ensure architecture matches
+    model_dir = os.path.dirname(os.path.dirname(eval_config.model_path))
+    model_args_path = os.path.join(model_dir, "checkpoint", "config.yaml")
+    
+    if os.path.exists(model_args_path):
+        print(f"Loading architecture config from {model_args_path}")
+        model_args = OmegaConf.load(model_args_path)
+    else:
+        print("Using current config.yaml for architecture settings")
+        model_args = config
+        
+    device = torch.device(f"cuda:{eval_config.gpu_number}" 
+                         if torch.cuda.is_available() and eval_config.gpu_number >= 0 
+                         else "cpu")
+    
+    evaluator = BrainToTextEvaluator(
+        model_path=eval_config.model_path,
+        device=device,
+        model_args=model_args
+    )
+    
+    # Use dataset_dir from paths
+    trials = load_trials(config.paths.dataset_dir, model_args.dataset.sessions, eval_config.eval_type)
+    print(f"Loaded {len(trials)} trials for evaluation.")
+    
+    results = evaluator.evaluate_trials(trials, day_idx=0)
+    
+    if eval_config.eval_type == "val":
+        total_ed, total_len = 0, 0
+        for res in results:
+            if "true_phonemes" in res:
+                pred = res["pred_phonemes"].split()
+                true = res["true_phonemes"].split()
+                ed = AF.edit_distance(pred, true)
+                total_ed += ed
+                total_len += len(true)
+        
+        if total_len > 0:
+            print(f"\nAggregate Phoneme Error Rate (PER): {100 * total_ed / total_len:.2f}%")
+
+    if eval_config.get("save_csv", True):
+        output_path = f"phoneme_results_{eval_config.eval_type}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(output_path, index=False)
+        print(f"Phoneme decoding results saved to {output_path}")
+
 
 def main():
-    # Load Config
-    with open('config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+    config_path = "config.yaml"
+    if not os.path.exists(config_path):
+        print(f"Error: {config_path} not found.")
+        sys.exit(1)
+        
+    config = OmegaConf.load(config_path)
+    mode = config.experiment.get("mode", "train")
+    
+    if mode == "train":
+        run_training(config)
+    elif mode in ["inference", "evaluate", "val", "test"]:
+        run_evaluation(config)
+    else:
+        print(f"Error: Unknown mode '{mode}'. Choose 'train' or 'inference'.")
+        sys.exit(1)
 
-    mode = config.get('mode', 'train')
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Running in {mode} mode on {device}")
-
-    m_cfg = config['model']
-    attn = Attention(m_cfg['enc_hid_dim'], m_cfg['dec_hid_dim'])
-    enc = Encoder(m_cfg['input_dim'], m_cfg['enc_hid_dim'], m_cfg['dec_hid_dim'], m_cfg['enc_dropout'])
-    dec = Decoder(m_cfg['output_dim'], m_cfg['dec_emb_dim'], m_cfg['enc_hid_dim'], m_cfg['dec_hid_dim'], m_cfg['dec_dropout'], attn)
-    model = Seq2Seq(enc, dec, device).to(device)
-
-    if mode == 'train':
-        t_cfg = config['training']
-        data_dir = config['data']['data_dir']
-        
-        train_dataset = BrainDataset(data_dir, dataset_type='train')
-        train_loader = DataLoader(train_dataset, batch_size=t_cfg['batch_size'], shuffle=True, collate_fn=collate_fn)
-        
-        val_dataset = BrainDataset(data_dir, dataset_type='val')
-        val_loader = DataLoader(val_dataset, batch_size=t_cfg['batch_size'], shuffle=False, collate_fn=collate_fn)
-        
-        optimizer = optim.Adam(model.parameters(), lr=t_cfg.get('learning_rate', 0.001))
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
-        
-        print(f"Starting training for {t_cfg['n_epochs']} epochs...")
-        
-        for epoch in range(t_cfg['n_epochs']):
-            train_loss = train(model, train_loader, optimizer, criterion, t_cfg['clip'])
-            val_loss = evaluate(model, val_loader, criterion)
-            
-            print(f'Epoch: {epoch+1:02}')
-            print(f'\tTrain Loss: {train_loss:.3f}')
-            print(f'\t Val. Loss: {val_loss:.3f}')
-            
-            torch.save(model.state_dict(), f'model_epoch_{epoch+1}.pt')
-
-    elif mode == 'inference':
-        i_cfg = config['inference']
-        data_dir = config['data']['data_dir']
-        
-        if os.path.exists(i_cfg['checkpoint_path']):
-            model.load_state_dict(torch.load(i_cfg['checkpoint_path'], map_location=device))
-            print(f"Loaded checkpoint: {i_cfg['checkpoint_path']}")
-        else:
-            print(f"WARNING: Checkpoint {i_cfg['checkpoint_path']} not found. Using random weights.")
-
-        dataset = BrainDataset(data_dir, dataset_type='train') # Or val/test
-        sample_idx = i_cfg['sample_idx']
-        src, trg, _, _, _ = dataset[sample_idx]
-        
-        print(f"Sample Index: {sample_idx}")
-        print(f"Input shape: {src.shape}")
-        
-        translation, attention = translate_sentence(model, src, device, max_len=i_cfg['max_len'])
-        print(f"Ground Truth: {trg[:20].tolist()} ...")
-        print(f"Predicted: {translation}")
-        
-        display_attention("Input", translation, attention, i_cfg['output_plot'])
 
 if __name__ == "__main__":
     main()
